@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>EMancipate — ProtoArc EM11 Pro</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font: 15px/1.5 -apple-system, system-ui, sans-serif; background:#15171a; color:#e7e9ec;
+         max-width: 680px; margin: 40px auto; padding: 0 20px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color:#9aa0a6; margin-bottom: 22px; }
+  button { font: inherit; color:#fff; background:#2d6cdf; border:0; border-radius:8px;
+           padding:8px 14px; cursor:pointer; }
+  button.sec { background:#2a2d31; }
+  button:disabled { opacity:.4; cursor:default; }
+  .card { background:#1c1f23; border:1px solid #2a2d31; border-radius:12px; padding:16px; margin:14px 0; }
+  .row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:8px 0; }
+  .row label { width:130px; color:#c4c8cc; }
+  select, input { font:inherit; background:#0f1113; color:#e7e9ec; border:1px solid #333; border-radius:6px; padding:6px 8px; }
+  input { width:90px; }
+  #log { white-space:pre-wrap; font:12px/1.5 ui-monospace, Menlo, monospace; background:#0f1113;
+         border:1px solid #2a2d31; border-radius:8px; padding:12px; height:200px; overflow:auto; color:#9fe0a0; }
+  .ok { color:#6fce7a; } .err { color:#ff7a7a; }
+  code { background:#0f1113; padding:1px 5px; border-radius:4px; }
+</style>
+
+<h1>EMancipate <span style="font-weight:400;color:#9aa0a6;font-size:15px">· free your EM11 Pro</span></h1>
+<div class="sub">Local tool. Talks straight to the mouse over WebHID using the reverse-engineered protocol. No website, no server.</div>
+
+<div class="card">
+  <div class="row">
+    <button id="connect">Connect mouse</button>
+    <span id="status" style="color:#9aa0a6">Not connected. Use the 2.4G receiver (not Bluetooth), then click Connect.</span>
+  </div>
+</div>
+
+<div class="card" id="panel" style="opacity:.4; pointer-events:none">
+  <div class="row">
+    <label>Button</label>
+    <select id="btn">
+      <option value="6c">Back</option>
+      <option value="70">Forward</option>
+      <option value="68">Wheel Click</option>
+      <option value="64">Right Click</option>
+      <option value="74">DPI Click</option>
+    </select>
+  </div>
+  <div class="row">
+    <label>Action</label>
+    <select id="action">
+      <option value="native-back">Raw mouse Back (button 4)</option>
+      <option value="native-fwd">Raw mouse Forward (button 5)</option>
+      <option value="disable">Disable (do nothing)</option>
+      <option value="key">Send a key — ⚠ macros are broken on this mouse</option>
+    </select>
+  </div>
+  <div class="row" id="keyrow" style="display:none">
+    <label>Key usage (hex)</label>
+    <input id="usage" value="68">
+    <span style="color:#d98a3a">Note: this mouse accepts key-macro writes but emits nothing. Use the raw-button options instead.</span>
+  </div>
+  <div class="row">
+    <button id="apply">Apply to mouse</button>
+    <button class="sec" id="quick">Quick: Back &amp; Forward → raw mouse buttons</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="sub" style="margin:0">
+    <strong>What this does:</strong> sets the side buttons to emit clean mouse buttons 4 &amp; 5
+    (instead of the firmware's <code>⌘[</code>/<code>⌘]</code> keystrokes), so any OS or remapper can
+    bind them freely. Browsers/Finder treat 4 &amp; 5 as Back/Forward automatically.
+  </div>
+
+<div class="card">
+  <div class="row" style="justify-content:space-between">
+    <strong>Log</strong><button class="sec" id="clear">Clear</button>
+  </div>
+  <div id="log"></div>
+</div>
+
+<div class="sub" style="text-align:center;margin-top:18px;opacity:.7">EMancipate · by Anarkissed · MIT · unaffiliated with ProtoArc</div>
+
+<script>
+let device = null;
+const $ = id => document.getElementById(id);
+const log = (m, cls='') => { const d=document.createElement('div'); if(cls)d.className=cls; d.textContent=m; $('log').appendChild(d); $('log').scrollTop=1e9; };
+const hex = a => [...a].map(b=>b.toString(16).padStart(2,'0')).join(' ');
+
+// frame: 16 bytes, byte15 = (0x4D - sum(first15)) & 0xFF
+function frame(bytes) {
+  const b = new Uint8Array(16);
+  bytes.forEach((v,i)=>b[i]=v);
+  let s=0; for(let i=0;i<15;i++) s+=b[i];
+  b[15] = (0x4d - s) & 0xff;
+  return b;
+}
+// slot for a button address: 0x20*((addr-0x64)/4 + 1)
+const slotFor = addr => 0x20 * (((addr - 0x64) / 4) + 1);
+
+const handshake = () => frame([0x01,0x00,0x00,0x00,0x08,0x93,0x48,0x71,0xcf]);
+const macroKey  = (slot,usage) => frame([0x07,0x00,0x01,slot,0x08,0x02,0x81,usage,0x00,0x41,usage,0x00,0x07,0x00,0x00]);
+const modeMacro = addr => frame([0x07,0x00,0x00,addr,0x04,0x05,0x00,0x00,(0x55-0x05)&0xff]);
+const modeNative= (addr,sub) => frame([0x07,0x00,0x00,addr,0x04,0x01,sub,0x00,(0x55-(0x01+sub))&0xff]); // sub 0x08=back 0x10=fwd
+const modeOff   = addr => frame([0x07,0x00,0x00,addr,0x04,0x00,0x00,0x00,(0x55)&0xff]);
+
+async function send(f, label) {
+  await device.sendReport(8, f.slice(0,16).subarray ? f.subarray(0,16) : f);
+  // sendReport excludes report id; our frame is the 16-byte payload
+  log('OUT ' + hex(f) + '  ' + label, 'ok');
+  await new Promise(r=>setTimeout(r,60));
+}
+
+async function applyKey(addr, usage) {
+  await send(handshake(), 'session');
+  await send(macroKey(slotFor(addr), usage), `store key 0x${usage.toString(16)} @slot 0x${slotFor(addr).toString(16)}`);
+  await send(modeMacro(addr), `button 0x${addr.toString(16)} → macro`);
+}
+async function applyMode(addr, kind) {
+  await send(handshake(), 'session');
+  if (kind==='native-back') await send(modeNative(addr,0x08), `button 0x${addr.toString(16)} → native Back`);
+  else if (kind==='native-fwd') await send(modeNative(addr,0x10), `button 0x${addr.toString(16)} → native Forward`);
+  else await send(modeOff(addr), `button 0x${addr.toString(16)} → disabled`);
+}
+
+$('connect').onclick = async () => {
+  try {
+    const [d] = await navigator.hid.requestDevice({ filters: [{ vendorId: 0x260d }] });
+    if (!d) { log('No device chosen.', 'err'); return; }
+    device = d;
+    if (!device.opened) await device.open();
+    $('status').textContent = `Connected: ${device.productName}`;
+    $('panel').style.opacity = 1; $('panel').style.pointerEvents = 'auto';
+    log('Connected to ' + device.productName, 'ok');
+  } catch (e) { log('Connect failed: ' + e.message, 'err'); }
+};
+
+$('action').onchange = () => { $('keyrow').style.display = $('action').value==='key' ? '' : 'none'; };
+
+$('apply').onclick = async () => {
+  try {
+    const addr = parseInt($('btn').value, 16);
+    const act = $('action').value;
+    if (act==='key') await applyKey(addr, parseInt($('usage').value, 16) & 0xff);
+    else await applyMode(addr, act);
+    log('✓ Applied. Test the button now.', 'ok');
+  } catch (e) { log('Apply failed: ' + e.message, 'err'); }
+};
+
+$('quick').onclick = async () => {
+  try {
+    await applyMode(0x6c, 'native-back'); // Back  → raw mouse button 4
+    await applyMode(0x70, 'native-fwd');  // Forward → raw mouse button 5
+    log('✓ Back & Forward now emit raw mouse buttons 4 & 5.', 'ok');
+  } catch (e) { log('Quick failed: ' + e.message, 'err'); }
+};
+
+$('clear').onclick = () => $('log').textContent = '';
+</script>

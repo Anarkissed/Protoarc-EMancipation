@@ -1,0 +1,34 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4F8CFF"/>
+      <stop offset="1" stop-color="#2D5BD6"/>
+    </linearGradient>
+    <linearGradient id="mouse" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#E9F0FF"/>
+    </linearGradient>
+    <filter id="sh" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="14" stdDeviation="22" flood-color="#11306e" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+  <!-- squircle background -->
+  <path d="M512 80
+           C 880 80 944 144 944 512
+           C 944 880 880 944 512 944
+           C 144 944 80 880 80 512
+           C 80 144 144 80 512 80 Z" fill="url(#bg)"/>
+  <!-- mouse body -->
+  <g filter="url(#sh)">
+    <rect x="372" y="300" width="280" height="430" rx="140" fill="url(#mouse)"/>
+    <!-- scroll wheel -->
+    <rect x="496" y="372" width="32" height="86" rx="16" fill="#2D5BD6"/>
+    <!-- center split line -->
+    <path d="M512 460 L512 540" stroke="#C7D6F5" stroke-width="10" stroke-linecap="round"/>
+  </g>
+  <!-- click radiating arcs (top-right) -->
+  <g stroke="#FFFFFF" stroke-width="26" stroke-linecap="round" fill="none" opacity="0.95">
+    <path d="M690 300 a150 150 0 0 1 44 104"/>
+    <path d="M734 250 a214 214 0 0 1 64 150"/>
+  </g>
+</svg>
