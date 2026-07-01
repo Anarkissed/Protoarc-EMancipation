@@ -47,7 +47,23 @@ struct Rule: Codable, Equatable, Identifiable {
 }
 struct AppRef: Codable, Equatable, Identifiable { var id: String { bundleID }; var bundleID: String; var name: String }
 struct SaveData: Codable { var apps: [AppRef]; var rules: [Rule] }
-
+// Tracks the most recently active app that ISN'T MouseTool, so "Use Current App"
+// can grab the real runtime bundle id (works for apps like Fusion whose .app
+// bundle differs from the process that owns the window).
+final class FrontTracker: ObservableObject {
+    @Published var last: AppRef? = nil
+    private var obs: NSObjectProtocol?
+    private let selfID = Bundle.main.bundleIdentifier
+    init() {
+        obs = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
+            guard let self = self,
+                  let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  let b = app.bundleIdentifier, b != self.selfID else { return }
+            self.last = AppRef(bundleID: b, name: app.localizedName ?? b)
+        }
+    }
+}
 // ──────────────────────── Key name <-> code ───────────────────────
 let nameToCode: [String: Int] = [
     "a":0,"b":11,"c":8,"d":2,"e":14,"f":3,"g":5,"h":4,"i":34,"j":38,"k":40,"l":37,"m":46,
@@ -376,53 +392,60 @@ struct ModChip: View {
     let mod: Modifier; @Binding var mods: [Modifier]; var save: () -> Void
     var on: Bool { mods.contains(mod) }
     var body: some View {
-        Button(mod.symbol) { if on { mods.removeAll { $0 == mod } } else { mods.append(mod) }; save() }
-            .buttonStyle(.plain).frame(width: 26, height: 22)
-            .background(RoundedRectangle(cornerRadius: 5).fill(on ? Color.accentColor : Color.secondary.opacity(0.15)))
-            .foregroundStyle(on ? .white : .secondary)
+        Button { if on { mods.removeAll { $0 == mod } } else { mods.append(mod) }; save() } label: {
+            Text(mod.symbol)
+                .frame(width: 26, height: 22)
+                .contentShape(Rectangle())
+                .background(RoundedRectangle(cornerRadius: 5).fill(on ? Color.accentColor : Color.secondary.opacity(0.15)))
+                .foregroundStyle(on ? .white : .secondary)
+        }
+        .buttonStyle(.plain)
     }
 }
 struct ActionEditor: View {
     @EnvironmentObject var store: RuleStore
     @Binding var rule: Rule
     var dismiss: () -> Void
-    @State private var text = ""
+    @State private var mods: [Modifier] = []
+    @State private var keyText = ""
+    @State private var fkey = ""           // "" = none, else "F1".."F12"
     @FocusState private var focused: Bool
-    var parsed: RuleAction? { parseShortcut(text) }
 
-    func suggestions() -> [String] {
-        let parts = text.split(separator: "+", omittingEmptySubsequences: false)
-        let last = (parts.last.map(String.init) ?? "").trimmingCharacters(in: .whitespaces).lowercased()
-        guard !last.isEmpty else { return [] }
-        return Array(shortcutVocab.filter { $0.lowercased().hasPrefix(last) }.prefix(5))
+    func keyCode() -> Int? {
+        let t = keyText.lowercased().trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty else { return nil }
+        return nameToCode[t]
     }
-    func complete(_ s: String) {
-        var parts = text.split(separator: "+", omittingEmptySubsequences: false).map { String($0) }
-        if parts.isEmpty { parts = [""] }
-        parts[parts.count - 1] = s
-        text = parts.joined(separator: "+") + "+"
+    var built: RuleAction? {
+        guard let kc = keyCode() else { return nil }
+        return RuleAction(type: "key", keyCode: kc, keyMods: mods)
     }
-    func applyAndClose() { if let p = parsed { rule.action = p; store.save(); dismiss() } }
+    func toggle(_ m: Modifier) { if mods.contains(m) { mods.removeAll { $0 == m } } else { mods.append(m) } }
+    func applyAndClose() { if let a = built { rule.action = a; store.save(); dismiss() } }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Type a keyboard shortcut").font(.headline)
-            TextField("e.g. Command+Tab", text: $text)
-                .textFieldStyle(.roundedBorder).frame(width: 240)
-                .focused($focused).onSubmit { applyAndClose() }
-            let sugg = suggestions()
-            if !sugg.isEmpty {
-                HStack(spacing: 6) {
-                    ForEach(sugg, id: \.self) { s in
-                        Button(s) { complete(s) }.buttonStyle(.bordered).controlSize(.small)
-                    }
+            Text("Build a keyboard shortcut").font(.headline)
+            HStack(spacing: 5) {
+                ForEach(Modifier.allCases, id: \.self) { m in
+                    Button(m.symbol) { toggle(m) }
+                        .buttonStyle(.plain).frame(width: 30, height: 28)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(mods.contains(m) ? Color.accentColor : Color.secondary.opacity(0.15)))
+                        .foregroundStyle(mods.contains(m) ? .white : .secondary)
+                        .help(m.fullName)
                 }
+                TextField("key (z, tab, ↑…)", text: $keyText)
+                    .textFieldStyle(.roundedBorder).frame(minWidth: 120)
+                    .focused($focused).onSubmit { applyAndClose() }
             }
-            if !text.isEmpty {
-                if let p = parsed { Label(actionDesc(p), systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.caption) }
-                else { Label("Keep typing…", systemImage: "ellipsis.circle").foregroundStyle(.orange).font(.caption) }
+            Picker("Function key", selection: $fkey) {
+                Text("Function key…").tag("")
+                ForEach(1...12, id: \.self) { Text("F\($0)").tag("F\($0)") }
             }
-            Button("Set shortcut") { applyAndClose() }.disabled(parsed == nil).keyboardShortcut(.defaultAction)
+            .onChange(of: fkey) { _, v in if !v.isEmpty { keyText = v } }
+            if built != nil { Label(actionDesc(built), systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.caption) }
+            else if !keyText.isEmpty { Label("Unknown key", systemImage: "questionmark.circle").foregroundStyle(.orange).font(.caption) }
+            Button("Set shortcut") { applyAndClose() }.disabled(built == nil).keyboardShortcut(.defaultAction)
             Divider()
             Text("Or a system action").font(.caption).foregroundStyle(.secondary)
             HStack {
@@ -432,11 +455,11 @@ struct ActionEditor: View {
             Button("Media Seek (wheel ◀▶)") { rule.action = RuleAction(type:"mediaSeek"); store.save(); dismiss() }
             Button("Clear action", role: .destructive) { rule.action = nil; store.save(); dismiss() }
         }
-        .padding(18).frame(width: 290)
+        .padding(18).frame(width: 320)
         .onAppear {
             if let a = rule.action, a.type == "key" {
-                let m = (a.keyMods ?? []).map { $0.fullName }.joined(separator: "+"); let k = codeDisplay(a.keyCode ?? -1)
-                text = m.isEmpty ? k : "\(m)+\(k)"
+                mods = a.keyMods ?? []
+                keyText = codeDisplay(a.keyCode ?? -1)
             }
             focused = true
         }
@@ -444,21 +467,31 @@ struct ActionEditor: View {
 }
 struct RuleRow: View {
     @EnvironmentObject var store: RuleStore
+    @EnvironmentObject var rec: Recorder
     @Binding var rule: Rule
     @State private var editing = false
     var body: some View {
-        HStack(spacing: 10) {
-            HStack(spacing: 3) { ForEach(Modifier.allCases, id: \.self) { m in ModChip(mod: m, mods: $rule.trigger.mods) { store.save() } } }
-            Text(triggerBase(rule.trigger)).frame(width: 130, alignment: .leading).font(.system(.body, design: .rounded))
-            Image(systemName: "arrow.right").foregroundStyle(.tertiary)
-            Button { editing = true } label: {
-                Text(actionDesc(rule.action)).foregroundStyle(rule.action == nil ? .secondary : .primary).frame(width: 150, alignment: .leading)
-            }.buttonStyle(.bordered).popover(isPresented: $editing) { ActionEditor(rule: $rule, dismiss: { editing = false }).environmentObject(store) }
-            Spacer()
-            Button(role: .destructive) { store.rules.removeAll { $0.id == rule.id }; store.save() } label: { Image(systemName: "trash") }
-                .buttonStyle(.borderless).foregroundStyle(.secondary)
-        }.padding(.vertical, 4).padding(.horizontal, 8)
-    }
+            HStack(spacing: 12) {
+                // LEFT: modifiers + trigger name
+                HStack(spacing: 8) {
+                    HStack(spacing: 3) { ForEach(Modifier.allCases, id: \.self) { m in ModChip(mod: m, mods: $rule.trigger.mods) { store.save() } } }
+                    Text(triggerBase(rule.trigger)).frame(width: 130, alignment: .leading).font(.system(.body, design: .rounded))
+                }
+                Spacer(minLength: 40)
+                // RIGHT: action + trash
+                Button { editing = true } label: {
+                    Text(actionDesc(rule.action)).foregroundStyle(rule.action == nil ? .secondary : .primary).frame(width: 150, alignment: .leading)
+                }.buttonStyle(.bordered).popover(isPresented: $editing) { ActionEditor(rule: $rule, dismiss: { editing = false }).environmentObject(store).environmentObject(rec) }
+                Button(role: .destructive) { store.rules.removeAll { $0.id == rule.id }; store.save() } label: { Image(systemName: "trash") }
+                    .buttonStyle(.borderless).foregroundStyle(.secondary)
+            }
+            .overlay(alignment: .center) {
+                Image(systemName: "arrow.right.circle.fill")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+            }
+            .padding(.vertical, 4).padding(.horizontal, 8)
+        }
 }
 struct TabChip: View {
     let title: String; let selected: Bool; let action: () -> Void
@@ -473,6 +506,13 @@ struct ContentView: View {
     @EnvironmentObject var store: RuleStore
     @EnvironmentObject var rec: Recorder
     @State private var scope: String? = nil       // nil = All Apps
+    @StateObject private var front = FrontTracker()
+
+        func addCurrentApp() {
+            guard let a = front.last else { return }
+            if !store.apps.contains(where: { $0.bundleID == a.bundleID }) { store.apps.append(a); store.save() }
+            scope = a.bundleID
+        }
     var recording: Bool { rec.mode == .trigger }
 
     func addApp() {
@@ -535,6 +575,9 @@ struct ContentView: View {
                         .font(.caption2).foregroundStyle(.tertiary).frame(maxWidth: .infinity, alignment: .leading)
                 }.padding(4)
             } label: { Label("Add a rule", systemImage: "plus") }
+            Button { addCurrentApp() } label: { Label("Use Current App", systemImage: "rectangle.inset.filled.and.person.filled") }
+                                    .buttonStyle(.bordered)
+                                    .help("Adds the app you were just using (switch to it, then click here)")
             // Rules for current scope
             GroupBox {
                 ScrollView {
